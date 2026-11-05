@@ -4,6 +4,13 @@ EIA publishes the full history of each series as an Excel 97 (.xls) file at
 https://www.eia.gov/dnav/pet/hist_xls/<SERIES_ID><frequency>.xls
 (frequency: "d" = daily, "w" = weekly). No account or API key is needed.
 
+Those .xls files are used for the 11 weekly series, but NOT for the daily
+prices: the published price files silently skip hundreds of ordinary trading
+days (about 757 for WTI and 900 for Brent). The daily prices therefore come
+from the EIA API v2, which returns the complete series and identical prices on
+the days both sources cover. The API needs a free key, read from the
+environment variable EIA_API_KEY (see the README).
+
 The project keeps the data as one CSV per metric, named after the metric:
     data/raw/weekly/crude_stocks.csv, data/raw/prices/wti.csv, ...
 Each CSV has two columns: date, <metric>.
@@ -25,9 +32,14 @@ from pathlib import Path
 import pandas as pd
 import requests
 
-from .config import MANIFEST_PATH, RAW_PRICES_DIR, RAW_WEEKLY_DIR, RAW_XLS_DIR, ROOT
+from .config import (EIA_API_KEY_VAR, ENV_PATH, MANIFEST_PATH, RAW_PRICES_DIR,
+                     RAW_WEEKLY_DIR, RAW_XLS_DIR, ROOT)
 
 EIA_HIST_URL = "https://www.eia.gov/dnav/pet/hist_xls/{series_id}{freq}.xls"
+
+# EIA API v2: the spot price route, used for the daily prices
+EIA_API_ROUTE = "https://api.eia.gov/v2/petroleum/pri/spt"
+EIA_API_PAGE_SIZE = 5000   # the API returns at most 5000 rows per request
 EIA_PAGE_URL = "https://www.eia.gov/dnav/pet/hist/LeafHandler.ashx?n=PET&s={series_id}&f={freq}"
 
 # First bytes of every Excel 97 (.xls) file. If EIA returns an HTML error page
@@ -154,6 +166,227 @@ def download_all(series: list[Series] = SERIES, force: bool = False,
 
 
 # ---------------------------------------------------------------------------
+# 1b. Download the daily prices from the EIA API v2
+# ---------------------------------------------------------------------------
+
+def eia_api_key() -> str:
+    """Read the EIA API key from the environment (loading .env if needed).
+
+    The key is a secret: it is kept in .env, which is in .gitignore, and is
+    never written to a notebook, a CSV or the README. This function returns it
+    for use in a request and nothing else ever prints it.
+    """
+    import os
+
+    if not os.environ.get(EIA_API_KEY_VAR):
+        try:
+            from dotenv import load_dotenv
+        except ImportError:  # pragma: no cover
+            raise RuntimeError(
+                "python-dotenv is not installed: run `pip install -r requirements.txt`"
+            ) from None
+        load_dotenv(ENV_PATH)
+
+    key = os.environ.get(EIA_API_KEY_VAR)
+    if not key:
+        raise RuntimeError(
+            f"No EIA API key found. Create a file called .env in the repository root "
+            f"containing one line:\n    {EIA_API_KEY_VAR}=your_key_here\n"
+            "A free key takes a minute to obtain at "
+            "https://www.eia.gov/opendata/register.php"
+        )
+    return key
+
+
+def _api_get(path: str, params: dict, timeout: int = 120) -> dict:
+    """One request to the EIA API, with the key kept out of every message.
+
+    `requests.raise_for_status()` and the exceptions raised by `requests` put
+    the full URL — and therefore the key — into their message. So the status is
+    checked by hand and every error is re-raised with a clean message, so the
+    key can never reach a traceback, a log or a notebook output.
+    """
+    url = f"{EIA_API_ROUTE}{path}"
+    try:
+        response = requests.get(
+            url, params={**params, "api_key": eia_api_key()}, timeout=timeout,
+            headers={"User-Agent": "ada-oil-volatility student project"},
+        )
+    except requests.RequestException as exc:
+        raise RuntimeError(
+            f"the EIA API could not be reached ({type(exc).__name__}); check the connection"
+        ) from None
+
+    if response.status_code == 403:
+        raise RuntimeError(
+            "the EIA API refused the key (HTTP 403). Check the value of "
+            f"{EIA_API_KEY_VAR} in .env; a free key is available at "
+            "https://www.eia.gov/opendata/register.php"
+        ) from None
+    if response.status_code != 200:
+        raise RuntimeError(
+            f"the EIA API returned HTTP {response.status_code} for {path}"
+        ) from None
+
+    return response.json()["response"]
+
+
+def api_route_metadata() -> dict:
+    """The spot price route's metadata: frequencies, facets and period range.
+
+    Used by notebook 01 to confirm the facet name (`series`) and the codes
+    (RWTC, RBRTE) before downloading, and as the small request that checks the
+    key works.
+    """
+    return _api_get("/", {})
+
+
+def api_series_names() -> pd.DataFrame:
+    """The series available on the spot price route, with their descriptions."""
+    facets = _api_get("/facet/series", {})["facets"]
+    return pd.DataFrame(facets).rename(columns={"id": "series_id", "name": "description"})
+
+
+def download_price_series(s: Series) -> pd.Series:
+    """Download one daily price series in full from the EIA API.
+
+    The API returns at most 5000 rows per request, so the pages are requested
+    one after another with an increasing `offset` until a short page arrives.
+    Rows are asked for in ascending date order, so the pages join up directly.
+    """
+    rows: list[dict] = []
+    offset = 0
+    while True:
+        page = _api_get("/data/", {
+            "frequency": "daily",
+            "data[0]": "value",
+            "facets[series][]": s.series_id,
+            "sort[0][column]": "period",
+            "sort[0][direction]": "asc",
+            "offset": offset,
+            "length": EIA_API_PAGE_SIZE,
+        })
+        data = page["data"]
+        rows.extend(data)
+        if len(data) < EIA_API_PAGE_SIZE:
+            break
+        offset += EIA_API_PAGE_SIZE
+
+    values = pd.Series(
+        {pd.Timestamp(row["period"]): row["value"] for row in rows},
+        dtype="float64", name=s.name,
+    ).sort_index()
+    if values.index.has_duplicates:
+        raise ValueError(f"{s.series_id}: the API returned duplicated dates")
+    return values.rename_axis("date")
+
+
+def read_price_xls(s: Series) -> pd.Series | None:
+    """The same price series from the downloaded .xls file, or None if absent.
+
+    Used only to check the API against the published file and to fill the few
+    days the API happens to be missing.
+    """
+    if not s.xls_path.exists():
+        return None
+    return read_eia_xls(s.xls_path).rename(s.name)
+
+
+def download_prices(names: list[str] | None = None, fill_from_xls: bool = True) -> pd.DataFrame:
+    """Write data/raw/prices/<name>.csv from the API, and report what changed.
+
+    The API is the main source because the .xls price files skip hundreds of
+    trading days. The .xls file is still used for two things:
+
+    * a check that the two sources agree — the prices must be identical on
+      every date they share;
+    * filling the handful of days that are in the .xls but not in the API
+      (8 for WTI, 9 for Brent), so neither source's gaps survive. Set
+      `fill_from_xls=False` to use the API alone.
+
+    The CSV keeps the format of stage 1: two columns, `date` and `<name>`.
+    """
+    series = [s for s in SERIES if s.group == "prices"
+              and (names is None or s.name in names)]
+    rows = []
+    for s in series:
+        api = download_price_series(s)
+        old = read_price_xls(s) if fill_from_xls else None
+
+        row = {"metric": s.name, "series_id": s.series_id, "n_api": len(api)}
+        if old is None:
+            row["n_xls"] = None
+            row["n_differences"] = None
+            row["added_by_api"] = None
+            row["filled_from_xls"] = 0
+            prices = api
+        else:
+            common = api.index.intersection(old.index)
+            differences = (api.loc[common] - old.loc[common]).abs() > 1e-9
+            missing_from_api = old.index.difference(api.index)
+            # API first, then the days only the .xls has
+            prices = pd.concat([api, old.loc[missing_from_api]]).sort_index()
+            row.update({
+                "n_xls": len(old),
+                "n_differences": int(differences.sum()),
+                "added_by_api": len(api.index.difference(old.index)),
+                "filled_from_xls": len(missing_from_api),
+            })
+
+        s.csv_path.parent.mkdir(parents=True, exist_ok=True)
+        prices.rename(s.name).rename_axis("date").to_csv(s.csv_path, date_format="%Y-%m-%d")
+        row["n_saved"] = len(prices)
+        row["saved_as"] = s.csv_path.relative_to(ROOT).as_posix()
+        rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
+def observations_per_year(name: str) -> pd.Series:
+    """Number of observations per calendar year for one metric, from its CSV."""
+    values = read_series(name).dropna()
+    return values.groupby(values.index.year).size().rename(name).rename_axis("year")
+
+
+def compare_price_sources(name: str) -> pd.DataFrame:
+    """Compare the API prices with the published .xls file, year by year.
+
+    Returns one row per year with: how many days each source has, how many days
+    the API adds, how many days only the .xls has, and on how many shared dates
+    the two prices disagree. Used by notebook 01 to show that the API fixes the
+    gaps without changing any price. Returns an empty frame if the .xls file has
+    not been downloaded.
+    """
+    s = SERIES_BY_NAME[name]
+    old = read_price_xls(s)
+    if old is None:
+        return pd.DataFrame()
+    api = download_price_series(s)
+
+    common = api.index.intersection(old.index)
+    differs = pd.Series((api.loc[common] - old.loc[common]).abs() > 1e-9, index=common)
+    added = api.index.difference(old.index)
+    only_xls = old.index.difference(api.index)
+
+    years = sorted({*api.index.year, *old.index.year})
+    table = pd.DataFrame({
+        "n_api": pd.Series(api.index.year).value_counts().reindex(years, fill_value=0),
+        "n_xls": pd.Series(old.index.year).value_counts().reindex(years, fill_value=0),
+        "added_by_api": pd.Series(added.year).value_counts().reindex(years, fill_value=0),
+        "only_in_xls": pd.Series(only_xls.year).value_counts().reindex(years, fill_value=0),
+        "price_differs": differs.groupby(common.year).sum().reindex(years, fill_value=0),
+    })
+    return table.rename_axis("year").astype(int)
+
+
+def weekly_observations_per_year() -> pd.DataFrame:
+    """Observations per year for the 11 weekly EIA series (expect 52 or 53)."""
+    columns = {s.name: observations_per_year(s.name)
+               for s in SERIES if s.group == "weekly"}
+    return pd.DataFrame(columns).rename_axis("year")
+
+
+# ---------------------------------------------------------------------------
 # 2. Read an .xls file and convert a whole folder to named CSV files
 # ---------------------------------------------------------------------------
 
@@ -192,12 +425,18 @@ def read_eia_xls(path: Path | str) -> pd.Series:
     return data.set_index("date")["value"].rename(series_id)
 
 
-def convert_xls_to_csv(src_dir: Path | str = RAW_XLS_DIR) -> pd.DataFrame:
+def convert_xls_to_csv(src_dir: Path | str = RAW_XLS_DIR,
+                       groups: tuple[str, ...] = ("weekly",)) -> pd.DataFrame:
     """Convert every EIA .xls file in src_dir to data/raw/<group>/<metric>.csv.
 
     Each file is identified from the series code stored inside it, not from its
     file name. Files that are not EIA history files, or are not used in the
     project, are skipped and reported. The original .xls files are not changed.
+
+    Only the groups listed in `groups` are written. By default the prices are
+    left out: the published price .xls files skip hundreds of trading days, so
+    `download_prices()` writes those CSVs from the EIA API instead. The price
+    .xls files are still read, for the comparison in notebook 01.
     """
     src_dir = Path(src_dir).expanduser()
     if not src_dir.is_dir():
@@ -219,6 +458,10 @@ def convert_xls_to_csv(src_dir: Path | str = RAW_XLS_DIR) -> pd.DataFrame:
         if s.series_id in done:
             rows.append({**row, "series_id": s.series_id,
                          "status": f"skipped: duplicate of {done[s.series_id]}"})
+            continue
+        if s.group not in groups:
+            rows.append({**row, "series_id": s.series_id,
+                         "status": "skipped: written by download_prices() from the EIA API"})
             continue
 
         s.csv_path.parent.mkdir(parents=True, exist_ok=True)
@@ -251,7 +494,9 @@ def build_manifest(series: list[Series] = SERIES, save: bool = True) -> pd.DataF
     for s in series:
         row = {"series_id": s.series_id, "metric": s.name, "description": s.description,
                "units": s.units, "frequency": "daily" if s.freq == "d" else "weekly",
-               "file": s.csv_path.relative_to(ROOT).as_posix(), "url": s.url,
+               "file": s.csv_path.relative_to(ROOT).as_posix(),
+               "source": "EIA API v2" if s.group == "prices" else "EIA .xls history file",
+               "url": EIA_API_ROUTE if s.group == "prices" else s.url,
                "committed_to_git": s.group == "weekly"}
         if not s.csv_path.exists():
             rows.append({**row, "status": "missing"})
@@ -285,6 +530,9 @@ if __name__ == "__main__":
 
     result = convert_xls_to_csv(args.folder)
     print(result.fillna("").to_string(index=False))
+    print("\nThe daily prices are not converted from .xls: run notebook 01, or\n"
+          "`python -c \"from src.data_utils import download_prices; print(download_prices())\"`,\n"
+          "to download them from the EIA API (needs EIA_API_KEY in .env).")
 
     manifest = build_manifest()
     missing = manifest.loc[manifest["status"] != "ok", "metric"].tolist()

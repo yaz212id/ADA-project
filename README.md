@@ -12,40 +12,70 @@ ada-oil-volatility/
 ├── requirements.txt            packages needed to run the code
 ├── src/                        code shared by the notebooks
 │   ├── config.py               folders, sample dates, train/tune/test split
-│   └── data_utils.py           list of EIA series; download, xls→csv conversion, reading
+│   ├── data_utils.py           list of EIA series; download, xls→csv conversion, reading
+│   └── cleaning.py             daily returns, weekly aggregation, EIA release-date alignment
 ├── notebooks/                  one notebook per stage, run in order
-│   └── 01_download_data.ipynb  stage 1: obtain the data
+│   ├── 01_download_data.ipynb  stage 1: obtain the data
+│   └── 02_clean_data.ipynb     stage 2: clean and build the weekly panel
 ├── data/
 │   ├── raw/
 │   │   ├── xls/                original EIA downloads (not committed)
 │   │   ├── weekly/             weekly petroleum data, one CSV per metric (committed)
 │   │   ├── prices/             daily WTI and Brent prices as CSV (not committed)
 │   │   └── manifest.csv        coverage of every file (written by notebook 01)
-│   └── processed/              cleaned data (later stages)
+│   └── processed/              cleaned data, not committed (written by notebook 02)
+│       ├── daily_returns.csv   daily log returns of WTI and Brent
+│       └── weekly_panel.csv    one row per week ending Friday: the stage 2 output
 ├── results/
 │   ├── figures/                every figure in the paper
 │   └── tables/                 every table in the paper
 └── paper/                      the paper (PDF)
 ```
 
-Planned stages: `02_clean_data` → `03_features` (PCA, regimes) → `04_models` → `05_backtest` → `06_figures_tables`.
+Planned stages: `03_features` (PCA, regimes) → `04_models` → `05_backtest` → `06_figures_tables`.
 
 ## How to run
 
 1. In the provided cloud workspace, clone this repository.
 2. Install the packages: `pip install -r requirements.txt`
-3. Run the notebooks in order, each from top to bottom in a fresh kernel.
+3. **Get a free EIA API key** and put it in a file called `.env` (see *The EIA API key* below). The daily prices cannot be downloaded without it.
+4. Run the notebooks in order, each from top to bottom in a fresh kernel.
 
-**Running time:** stage 1 takes about 1–2 minutes (13 small downloads). **Resources:** nothing beyond the provided workspace; stage 1 needs internet access to `www.eia.gov`.
+| Stage | Notebook | What it produces | Running time |
+|---|---|---|---|
+| 1 | `01_download_data.ipynb` | the 13 CSV files in `data/raw/` and `manifest.csv` | 1–2 min (13 `.xls` downloads + ~12 API requests) |
+| 2 | `02_clean_data.ipynb` | `data/processed/daily_returns.csv`, `data/processed/weekly_panel.csv`, `results/tables/data_coverage.csv` | under 15 s |
+
+**Resources:** nothing beyond the provided workspace. Only stage 1 needs internet access (to `www.eia.gov` and `api.eia.gov`); stage 2 runs offline on the files stage 1 wrote. Peak memory is a few hundred MB — the whole data set is well under 10 MB.
+
+### The EIA API key
+
+The daily spot prices come from the **EIA API v2**, which needs a free key (no cost, no approval wait):
+
+1. Register at <https://www.eia.gov/opendata/register.php>; the key arrives by email.
+2. In the repository root, create a file called `.env` containing exactly one line:
+
+   ```
+   EIA_API_KEY=your_key_here
+   ```
+
+3. `.env` is listed in `.gitignore`, so the key is **never committed**. It is read by `python-dotenv` into the environment variable `EIA_API_KEY` and used only in requests to `api.eia.gov`. No notebook, CSV, table or log in this repository ever prints it.
+
+An API key identifies the caller so EIA can apply its rate limits; it is not a password and gives access to no private data, but it is personal, so it is kept out of Git like any other credential.
 
 ## Data
 
-All data come from the U.S. Energy Information Administration (EIA). No account or API key is needed. Notebook 01 downloads each series' history file from `https://www.eia.gov/dnav/pet/hist_xls/<code><d|w>.xls` and converts it to one CSV per metric (columns `date, <metric>`).
+All data come from the U.S. Energy Information Administration (EIA), from two of its products:
+
+- the **11 weekly series** are read from the `.xls` history files at `https://www.eia.gov/dnav/pet/hist_xls/<code>w.xls` (no key needed);
+- the **2 daily price series** come from the **EIA API v2** (`https://api.eia.gov/v2/petroleum/pri/spt`), which needs a free key.
+
+The daily `.xls` price files are **not** used, because they silently omit hundreds of ordinary trading days (757 for WTI, 900 for Brent, worst in 1999, 2003 and 2011). The API returns the complete series, with identical prices on the dates both sources cover. Notebook 01 reports that comparison. Every series is saved as one CSV per metric (columns `date, <metric>`).
 
 | CSV file | EIA code | Series | Units | Frequency | From | In repo |
 |---|---|---|---|---|---|---|
-| `prices/wti.csv` | RWTC | WTI spot price, Cushing OK | USD/barrel | daily | 1986 | no |
-| `prices/brent.csv` | RBRTE | Brent spot price, Europe | USD/barrel | daily | 1987 | no |
+| `prices/wti.csv` | RWTC | WTI spot price, Cushing OK (**EIA API v2**) | USD/barrel | daily | 1986 | no |
+| `prices/brent.csv` | RBRTE | Brent spot price, Europe (**EIA API v2**) | USD/barrel | daily | 1987 | no |
 | `weekly/crude_stocks.csv` | WCESTUS1 | Commercial crude oil stocks (excl. SPR) | thousand barrels | weekly | 1982 | yes |
 | `weekly/cushing_stocks.csv` | W_EPC0_SAX_YCUOK_MBBL | Cushing OK crude oil stocks | thousand barrels | weekly | 2004 | yes |
 | `weekly/spr_stocks.csv` | WCSSTUS1 | Strategic Petroleum Reserve stocks | thousand barrels | weekly | 1982 | yes |
@@ -73,11 +103,16 @@ python -m src.data_utils "path/to/folder/with/the/xls/files"
 
 Each file is recognised from the EIA code stored inside it, so the file names do not matter. It is saved as the matching CSV above; other files are skipped and listed. The original `.xls` files are not changed. Copying the `.xls` files into `data/raw/xls/` and running notebook 01 does the same.
 
-### Notes for the later stages
+### Stage 2: how the weekly panel is built
 
-- A weekly EIA value refers to the week ending **Friday** and is published the following **Wednesday** at 10:30 ET (Thursday after a US federal holiday). Features must only use values published before the week being forecast.
-- Cushing stocks start in 2004, later than the other series.
-- The WTI spot price was negative (−36.98 USD) on 20 April 2020.
+`weekly_panel.csv` has one row per week ending Friday (1 400 weeks, 2000-01-07 to 2026-10-30) and contains only information known at the close of that Friday.
+
+- **Weeks** end on Friday (`W-FRI`), the same convention as the EIA weeks.
+- **Price variables**, for WTI and for Brent: `rv` (realised variance, the sum of squared daily log returns), `n_days`, `rvol_ann` (`100*sqrt(52*rv)`), `log_rv`, `ret_w` (weekly log return). `rv`, `rvol_ann` and `log_rv` are `NaN` when `n_days < 3`.
+- **Negative price.** WTI settled at −36.98 USD on 20 April 2020, so `ln(P)` is undefined: the returns into and out of that price are `NaN`. Prices are never filled or interpolated. Brent is the robustness check for that episode.
+- **No look-ahead.** A weekly EIA value refers to the week ending Friday but is published the following **Wednesday** at 10:30 ET (Thursday after a US federal holiday). The panel uses `release_date = week-ending + 6 days` and a backward `merge_asof`, so week `t` only ever sees the EIA week ending `t − 7 days`. The `eia_week` column records which EIA week each row used.
+- **Cushing stocks** start on 2004-04-09 and are `NaN` before that. No row or column is dropped.
+- **Known limitation.** The EIA *spot price* series skip trading days before about 2007 (2003 averages 2.7 WTI prices per week). Since `rv` is a sum over the days available, early-sample volatility is biased slightly downwards. `results/tables/data_coverage.csv` and section E.4 of notebook 02 quantify this.
 
 ## Tools and attribution
 
