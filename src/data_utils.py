@@ -25,8 +25,10 @@ paper appendix).
 from __future__ import annotations
 
 import argparse
+import hashlib
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -484,11 +486,70 @@ def read_series(name: str) -> pd.Series:
     return data[name]
 
 
+def file_sha256(path: Path | str) -> str:
+    """SHA-256 of a file, as hex. Identifies a data file without storing it.
+
+    The price CSVs cannot be committed (third-party data), so the manifest
+    records their hash instead: anyone with their own EIA key can regenerate the
+    files and check they got byte-for-byte the same data.
+    """
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def file_written_utc(path: Path | str) -> str:
+    """When the file was last written, in UTC, to the second.
+
+    Used as the download date of each series: the CSV is written by the
+    download step, so its modification time is when that data was obtained.
+    """
+    stamp = datetime.fromtimestamp(Path(path).stat().st_mtime, tz=timezone.utc)
+    return stamp.strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def price_hash_report(series: list[Series] | None = None) -> pd.DataFrame:
+    """Compare the price CSVs on disk with the hashes in the manifest.
+
+    The price files are not in Git, so this is how a later stage checks it is
+    reading the same data the manifest describes. One row per price series with
+    the hash recorded, the hash now, and whether they match.
+    """
+    series = [s for s in SERIES if s.group == "prices"] if series is None else series
+    if not MANIFEST_PATH.exists():
+        return pd.DataFrame()
+
+    manifest = pd.read_csv(MANIFEST_PATH).set_index("metric")
+    rows = []
+    for s in series:
+        row = {"metric": s.name, "file": s.csv_path.relative_to(ROOT).as_posix()}
+        recorded = manifest["sha256"].get(s.name) if "sha256" in manifest else None
+        if not s.csv_path.exists():
+            rows.append({**row, "status": "file missing", "matches": False,
+                         "recorded_sha256": recorded, "current_sha256": None})
+            continue
+        current = file_sha256(s.csv_path)
+        if not isinstance(recorded, str) or not recorded:
+            rows.append({**row, "status": "no hash in manifest", "matches": False,
+                         "recorded_sha256": recorded, "current_sha256": current})
+            continue
+        matches = bool(recorded == current)
+        rows.append({**row, "status": "same data" if matches else "DIFFERENT DATA",
+                     "matches": matches, "recorded_sha256": recorded,
+                     "current_sha256": current})
+    return pd.DataFrame(rows)
+
+
 def build_manifest(series: list[Series] = SERIES, save: bool = True) -> pd.DataFrame:
     """Check every CSV and record what it contains (data/raw/manifest.csv).
 
-    The manifest documents the data set for the paper: coverage and number of
-    observations of each file. The last date shows which EIA release was used.
+    The manifest documents the data set for the paper: where each series came
+    from, when it was obtained, what it covers, and a SHA-256 hash of the CSV.
+    The hash matters because the price files are third-party data and cannot be
+    committed: the manifest is the record that lets anyone confirm they are
+    using the same data. It contains no prices, so it is safe to commit.
     """
     rows = []
     for s in series:
@@ -509,8 +570,11 @@ def build_manifest(series: list[Series] = SERIES, save: bool = True) -> pd.DataF
         rows.append({**row, "status": "ok",
                      "first_date": values.index.min().date(),
                      "last_date": values.index.max().date(),
+                     "n_rows": int(len(values)),
                      "n_obs": int(values.notna().sum()),
-                     "n_missing": int(values.isna().sum())})
+                     "n_missing": int(values.isna().sum()),
+                     "downloaded_utc": file_written_utc(s.csv_path),
+                     "sha256": file_sha256(s.csv_path)})
 
     manifest = pd.DataFrame(rows)
     if save:

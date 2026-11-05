@@ -12,6 +12,9 @@ data/processed/*.csv
 # Unfinished downloads
 *.part
 
+# Testing area: every notebook change is tried here first, never submitted
+drafts/
+
 # Python caches and notebook checkpoints
 __pycache__/
 *.pyc

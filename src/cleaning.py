@@ -528,6 +528,95 @@ def fss_comparison(panel: pd.DataFrame, names: list[str] = PRICE_NAMES) -> pd.Da
     return pd.DataFrame(rows)
 
 
+def raw_eia_missing_weeks(names: list[str] = EIA_NAMES) -> pd.DataFrame:
+    """Weeks missing from each raw EIA CSV, after that series' first observation.
+
+    Two things can be missing: a week present with an empty value, and a week
+    absent from the file altogether. Both are found by laying the series on a
+    complete Friday grid running from its own first to its own last observation,
+    so nothing before a series starts is counted as missing.
+
+    Nothing is filled: this only reports the dates, for stage 3 to act on.
+    """
+    rows = []
+    for name in names:
+        values = read_series(name).sort_index()
+        present = values.dropna()
+        if present.empty:
+            rows.append({"metric": name, "first_date": None, "last_date": None,
+                         "expected_weeks": 0, "n_missing": 0, "missing_dates": ""})
+            continue
+        grid = pd.date_range(present.index.min(), present.index.max(), freq=WEEK_FREQ)
+        on_grid = values.reindex(grid)
+        missing = on_grid.index[on_grid.isna()]
+        # weeks EIA dated off the Friday grid would show up here as well
+        off_grid = values.index.difference(grid)
+        rows.append({
+            "metric": name,
+            "first_date": present.index.min().date(),
+            "last_date": present.index.max().date(),
+            "expected_weeks": len(grid),
+            "n_missing": len(missing),
+            "n_dates_off_friday_grid": len(off_grid),
+            "missing_dates": ", ".join(d.strftime("%Y-%m-%d") for d in missing),
+        })
+    return pd.DataFrame(rows)
+
+
+def panel_eia_missing_weeks(panel: pd.DataFrame,
+                            names: list[str] = EIA_NAMES) -> pd.DataFrame:
+    """Weeks with a missing EIA value in the panel, after the column starts.
+
+    The panel only holds the sample period, and a series that starts later (only
+    `cushing_stocks`) is NaN before its first value by construction. Those rows
+    are not missing data, so the count starts at each column's first non-missing
+    week.
+    """
+    rows = []
+    for name in names:
+        values = panel[name]
+        present = values.dropna()
+        if present.empty:
+            rows.append({"metric": name, "first_week": None, "n_weeks_after_start": 0,
+                         "n_missing_after_start": 0, "missing_weeks": ""})
+            continue
+        after_start = values.loc[present.index.min():]
+        missing = after_start.index[after_start.isna()]
+        rows.append({
+            "metric": name,
+            "first_week": present.index.min().date(),
+            "n_weeks_after_start": len(after_start),
+            "n_missing_after_start": len(missing),
+            "missing_weeks": ", ".join(d.strftime("%Y-%m-%d") for d in missing),
+        })
+    return pd.DataFrame(rows)
+
+
+def log_rv_gap_to_next(panel: pd.DataFrame, name: str = "wti",
+                       week: str = "2020-04-24") -> dict:
+    """How far one week's log_rv stands above the next-highest week.
+
+    On the log scale a difference is a ratio: a gap of 1.2 log points means the
+    variance of that week was exp(1.2) times the next-worst. This is the number
+    that says whether the most extreme week is an outlier the models will chase.
+    """
+    column = f"{name}_log_rv"
+    ranked = panel[column].dropna().sort_values(ascending=False)
+    target = pd.Timestamp(week)
+    top_week, top_value = ranked.index[0], ranked.iloc[0]
+    runner_week, runner_value = ranked.index[1], ranked.iloc[1]
+    return {
+        "series": name,
+        "highest_week": top_week.date(),
+        "highest_log_rv": round(float(top_value), 3),
+        "next_week": runner_week.date(),
+        "next_log_rv": round(float(runner_value), 3),
+        "gap_log_points": round(float(top_value - runner_value), 3),
+        "times_larger": round(float(np.exp(top_value - runner_value)), 2),
+        "asked_week_is_highest": bool(top_week == target),
+    }
+
+
 def most_volatile_weeks(panel: pd.DataFrame, name: str = "wti", n: int = 10) -> pd.DataFrame:
     """The `n` weeks with the highest log realised variance."""
     columns = [f"{name}_log_rv", f"{name}_rvol_ann", f"{name}_n_days", f"{name}_ret_w"]

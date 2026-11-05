@@ -9,6 +9,8 @@ ADA 2026 semester project · HEC Lausanne · *[Your full name]*
 ```
 ada-oil-volatility/
 ├── README.md
+├── CLAUDE.md                   project context and conventions
+├── run_all.py                  the single entry point: runs every stage in order
 ├── requirements.txt            packages needed to run the code
 ├── src/                        code shared by the notebooks
 │   ├── config.py               folders, sample dates, train/tune/test split
@@ -30,7 +32,8 @@ ada-oil-volatility/
 ├── results/
 │   ├── figures/                every figure in the paper
 │   └── tables/                 every table in the paper
-└── paper/                      the paper (PDF)
+├── paper/                      the paper (PDF)
+└── drafts/                     testing area, NOT in Git and not part of the submission
 ```
 
 Planned stages: `03_features` (PCA, regimes) → `04_models` → `05_backtest` → `06_figures_tables`.
@@ -40,14 +43,43 @@ Planned stages: `03_features` (PCA, regimes) → `04_models` → `05_backtest` �
 1. In the provided cloud workspace, clone this repository.
 2. Install the packages: `pip install -r requirements.txt`
 3. **Get a free EIA API key** and put it in a file called `.env` (see *The EIA API key* below). The daily prices cannot be downloaded without it.
-4. Run the notebooks in order, each from top to bottom in a fresh kernel.
+4. Run the whole analysis:
+
+   ```
+   python run_all.py
+   ```
+
+   `run_all.py` executes every stage notebook in order, each in a **fresh kernel**, stops at the first error and names the notebook and cell that failed, and prints the running time of each stage. It contains no analysis of its own — only the list of notebooks (`STAGES`) and the loop that runs them.
+
+   | command | what it does |
+   |---|---|
+   | `python run_all.py` | run every stage in order |
+   | `python run_all.py --only 02` | run one stage |
+   | `python run_all.py --list` | list the stages without running them |
+   | `python run_all.py --timeout 1800` | raise the per-cell time limit |
+
+   Each notebook can also be opened and run top to bottom in Jupyter; `run_all.py` is only a convenience and the check that the whole pipeline still works.
 
 | Stage | Notebook | What it produces | Running time |
 |---|---|---|---|
-| 1 | `01_download_data.ipynb` | the 13 CSV files in `data/raw/` and `manifest.csv` | 1–2 min (13 `.xls` downloads + ~12 API requests) |
-| 2 | `02_clean_data.ipynb` | `data/processed/daily_returns.csv`, `data/processed/weekly_panel.csv`, `results/tables/data_coverage.csv` | under 15 s |
+| 1 | `01_download_data.ipynb` | the 13 CSV files in `data/raw/` and `manifest.csv` | ~17 s (13 `.xls` downloads + ~12 API requests) |
+| 2 | `02_clean_data.ipynb` | `data/processed/daily_returns.csv`, `data/processed/weekly_panel.csv`, `results/tables/data_coverage.csv` | ~5 s |
+| | **total** (`python run_all.py`) | | **~22 s** |
+
+Measured on a 2024 MacBook (Apple silicon, Python 3.13). Stage 1 is almost entirely waiting on the EIA servers, so it varies with the connection; a first run that has to download every `.xls` file takes longer than a re-run, which skips files already present.
 
 **Resources:** nothing beyond the provided workspace. Only stage 1 needs internet access (to `www.eia.gov` and `api.eia.gov`); stage 2 runs offline on the files stage 1 wrote. Peak memory is a few hundred MB — the whole data set is well under 10 MB.
+
+### How a change is made: the `drafts/` workflow
+
+Each stage is one notebook, and every notebook must run from top to bottom in a fresh kernel. To keep that true, no notebook in `notebooks/` is edited directly:
+
+1. A new notebook, or a change to an existing one, is built first as a copy in `drafts/` (for example `drafts/02_clean_data_draft.ipynb`).
+2. The draft must run top to bottom in a fresh kernel with no errors and with its checks passing.
+3. Only then does it replace or join the version in `notebooks/`, and a new stage is added to `STAGES` in `run_all.py`.
+4. Finally `python run_all.py` confirms the whole pipeline still works.
+
+`drafts/` is in `.gitignore`: it never reaches GitHub and **is not part of the submission**.
 
 ### The EIA API key
 
