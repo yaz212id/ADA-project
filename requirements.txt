@@ -1,0 +1,12 @@
+# Stage 1 (obtain the data)
+pandas>=2.0
+numpy>=1.24
+requests>=2.28
+xlrd>=2.0          # reads EIA's .xls files
+jupyter>=1.0
+
+# Add packages for later stages here as you use them, e.g.:
+# scikit-learn     (Lasso, random forest, PCA, Gaussian mixture)
+# arch             (GARCH)
+# torch            (LSTM)
+# matplotlib       (figures)

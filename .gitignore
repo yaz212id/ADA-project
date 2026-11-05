@@ -1,0 +1,25 @@
+# Spot prices are third-party data: downloaded by notebook 01, never committed
+data/raw/prices/
+
+# Original EIA .xls downloads (the CSV copies in data/raw/weekly/ are committed)
+data/raw/xls/
+
+# Unfinished downloads
+*.part
+
+# Python caches and notebook checkpoints
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Virtual environments and secrets
+.venv/
+venv/
+env/
+.env
+
+# Editor and system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
