@@ -13,7 +13,8 @@ ada-oil-volatility/
 ├── src/                        code shared by the notebooks
 │   ├── config.py               folders, sample dates, train/tune/test split
 │   ├── data_utils.py           list of EIA series; download, xls→csv conversion, reading
-│   └── cleaning.py             daily returns, weekly aggregation, EIA release-date alignment
+│   ├── cleaning.py             daily returns, weekly aggregation, EIA release-date alignment
+│   └── evaluation.py           QLIKE, MSE and Mincer-Zarnowitz for scoring forecasts (stage 4)
 ├── notebooks/                  one notebook per stage, run in order
 │   ├── 01_download_data.ipynb  stage 1: obtain the data
 │   └── 02_clean_data.ipynb     stage 2: clean and build the weekly panel
@@ -88,6 +89,15 @@ The daily `.xls` price files are **not** used, because they silently omit hundre
 | `weekly/crude_exports.csv` | WCREXUS2 | Crude oil exports | thousand barrels/day | weekly | 1991 | yes |
 | `weekly/product_supplied.csv` | WRPUPUS2 | Product supplied, all products (demand proxy) | thousand barrels/day | weekly | 1990 | yes |
 
+## References
+
+- Andersen, T. G., Bollerslev, T., Diebold, F. X. & Labys, P. (2003). "Modeling and forecasting realized volatility." *Econometrica* 71(2), 579–625. — realised variance as the sum of squared log returns within a period, and modelling its logarithm.
+- French, K. R., Schwert, G. W. & Stambaugh, R. F. (1987). "Expected stock returns and volatility." *Journal of Financial Economics* 19(1), 3–29. — building the same measure for a lower-frequency period out of daily returns, with the optional `2 * sum(r_t * r_{t-1})` correction for autocorrelation.
+- Patton, A. J. (2011). "Volatility forecast comparison using imperfect volatility proxies." *Journal of Econometrics* 160(1), 246–256. — with a noisy proxy, only robust losses (QLIKE and MSE on the variance scale) rank forecasts correctly; MSE on log variance and MAE do not.
+- Patton, A. J. & Sheppard, K. (2009). "Evaluating volatility and correlation forecasts." In: *Handbook of Financial Time Series*, 801–838. — a conditionally unbiased proxy suffices; use QLIKE and the GLS form of the Mincer–Zarnowitz regression.
+
+**How this project uses them.** The target is weekly realised variance built from daily WTI log returns as in Andersen et al. (2003) and French, Schwert & Stambaugh (1987), modelled as `log_rv`; forecasts are converted back to variances with `exp(mu + s2/2)` and compared on the variance scale with QLIKE (main), MSE and the GLS Mincer–Zarnowitz regression, following Patton (2011) and Patton & Sheppard (2009).
+
 ### Licence
 
 - **Weekly petroleum data** (Weekly Petroleum Status Report) are U.S. government data in the public domain ([EIA copyright and reuse policy](https://www.eia.gov/about/copyrights_reuse.php)). They are included in `data/raw/weekly/`. Source: U.S. Energy Information Administration, Weekly Petroleum Status Report.
@@ -112,7 +122,8 @@ Each file is recognised from the EIA code stored inside it, so the file names do
 - **Negative price.** WTI settled at −36.98 USD on 20 April 2020, so `ln(P)` is undefined: the returns into and out of that price are `NaN`. Prices are never filled or interpolated. Brent is the robustness check for that episode.
 - **No look-ahead.** A weekly EIA value refers to the week ending Friday but is published the following **Wednesday** at 10:30 ET (Thursday after a US federal holiday). The panel uses `release_date = week-ending + 6 days` and a backward `merge_asof`, so week `t` only ever sees the EIA week ending `t − 7 days`. The `eia_week` column records which EIA week each row used.
 - **Cushing stocks** start on 2004-04-09 and are `NaN` before that. No row or column is dropped.
-- **Known limitation.** The EIA *spot price* series skip trading days before about 2007 (2003 averages 2.7 WTI prices per week). Since `rv` is a sum over the days available, early-sample volatility is biased slightly downwards. `results/tables/data_coverage.csv` and section E.4 of notebook 02 quantify this.
+- **The proxy.** Weekly realised variance is the sum of squared daily log returns (Andersen et al., 2003), built from daily returns as in French, Schwert & Stambaugh (1987), and rescaled to a five-day week as `rv_adj = rv * 5 / n_days` so holiday weeks stay comparable. Models are fitted on `log_rv = ln(rv_adj)`. With only ~5 returns a week the proxy is conditionally unbiased but noisy, which caps every model's R², so forecasts are scored on the **variance** scale with QLIKE, MSE and the GLS Mincer–Zarnowitz regression (`src/evaluation.py`), never with MSE on `log_rv` (Patton, 2011). `rv_fss` adds the FSS autocovariance correction and is kept as a robustness proxy only.
+- **Remaining limitations.** No free intraday oil price data exists, so the weekly proxy cannot be made less noisy. Cushing stocks start in 2004. Section E of notebook 02 checks the proxy's assumptions, and `results/tables/data_coverage.csv` records the coverage of every column.
 
 ## Tools and attribution
 

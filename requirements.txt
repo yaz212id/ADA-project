@@ -8,6 +8,7 @@ jupyter>=1.0
 
 # Stage 2 (clean the data and build the weekly panel)
 matplotlib>=3.7    # inline checks in notebook 02, figures in stage 6
+statsmodels>=0.14  # Mincer-Zarnowitz regressions in src/evaluation.py
 
 # Add packages for later stages here as you use them, e.g.:
 # scikit-learn     (Lasso, random forest, PCA, Gaussian mixture)

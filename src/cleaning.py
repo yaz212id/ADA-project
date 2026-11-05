@@ -33,7 +33,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from .config import SAMPLE_END, SAMPLE_START
+from .config import SAMPLE_END, SAMPLE_START, TRAIN_END, VALID_END
 from .data_utils import SERIES, read_series
 
 # Weeks end on Friday, like the EIA weeks.
@@ -56,7 +56,7 @@ PRICE_NAMES = ["wti", "brent"]
 EIA_NAMES = [s.name for s in SERIES if s.group == "weekly"]
 
 # The price variables computed for each price series, in panel order.
-PRICE_VARS = ["rv", "rv_adj", "n_days", "log_rv", "rvol_ann", "ret_w"]
+PRICE_VARS = ["rv", "rv_adj", "n_days", "log_rv", "rvol_ann", "ret_w", "rv_fss"]
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +148,26 @@ def non_positive_prices(name: str) -> pd.Series:
 # B. Weekly price variables
 # ---------------------------------------------------------------------------
 
+def _fss_sum(week_returns: pd.Series) -> float:
+    """French-Schwert-Stambaugh variance of one week, before rescaling.
+
+    `sum(r^2) + 2 * sum(r_t * r_{t-1})`. The second term adds the sample
+    autocovariance of consecutive returns, which corrects the realised variance
+    when daily returns are autocorrelated (French, Schwert & Stambaugh, 1987).
+    Only pairs of returns that both fall inside the week are used, so no
+    information crosses a week boundary.
+
+    The correction can make the result zero or negative when returns are
+    strongly negatively autocorrelated; the caller drops those weeks.
+    """
+    values = week_returns.dropna().to_numpy()
+    if values.size == 0:
+        return np.nan
+    squares = float((values ** 2).sum())
+    cross = float((values[1:] * values[:-1]).sum()) if values.size > 1 else 0.0
+    return squares + 2 * cross
+
+
 def weekly_price_vars(prices: pd.Series, returns: pd.DataFrame,
                       min_days: int = MIN_DAYS_PER_WEEK) -> pd.DataFrame:
     """Weekly realised volatility and weekly return for one price series.
@@ -165,7 +185,9 @@ def weekly_price_vars(prices: pd.Series, returns: pd.DataFrame,
     * `rvol_ann` `100 * sqrt(52 * rv_adj)`, annualised volatility in percent,
                  used for figures and tables only;
     * `ret_w`    weekly log return: last price of the week against the last
-                 price of the previous week.
+                 price of the previous week;
+    * `rv_fss`   robustness proxy: the same variance with the French-Schwert-
+                 Stambaugh autocovariance correction, also on a five-day scale.
 
     `rv`, `rv_adj`, `log_rv` and `rvol_ann` are set to NaN when fewer than
     `min_days` trading days are covered, or when `rv` is exactly 0 (the log
@@ -189,9 +211,14 @@ def weekly_price_vars(prices: pd.Series, returns: pd.DataFrame,
     ret_w = np.log(week_close.where(positive)).diff()
     ret_w = ret_w.where(positive & positive.shift(1))
 
+    # Robustness proxy: the same variance with the FSS autocovariance correction,
+    # on the same five-day scale. Dropped when the correction makes it non-positive.
+    rv_fss = weekly["ret"].apply(_fss_sum) * DAYS_PER_WEEK / n_days.where(n_days > 0)
+    rv_fss = rv_fss.where((n_days >= min_days) & (rv_fss > 0))
+
     return pd.DataFrame(
         {"rv": rv, "rv_adj": rv_adj, "n_days": n_days,
-         "log_rv": log_rv, "rvol_ann": rvol_ann, "ret_w": ret_w}
+         "log_rv": log_rv, "rvol_ann": rvol_ann, "ret_w": ret_w, "rv_fss": rv_fss}
     ).rename_axis("date")
 
 
@@ -402,6 +429,103 @@ def check_panel(panel: pd.DataFrame, min_lag_days: int = 7) -> None:
             f"{len(violations)} rows use EIA data published after their own week:\n"
             f"{violations.head().to_string()}"
         )
+
+
+# ---------------------------------------------------------------------------
+# E2. Checks on the assumptions behind the proxy
+# ---------------------------------------------------------------------------
+
+# The chronological sub-periods of the project, from config.py.
+SUB_PERIODS: dict[str, tuple[str, str]] = {
+    "train 2000-2014": (SAMPLE_START, TRAIN_END),
+    "tune 2015-2018": (TRAIN_END, VALID_END),
+    "test 2019-2026": (VALID_END, SAMPLE_END),
+    "whole sample": (SAMPLE_START, SAMPLE_END),
+}
+
+
+def return_diagnostics(returns: pd.DataFrame, names: list[str] = PRICE_NAMES,
+                       periods: dict[str, tuple[str, str]] | None = None) -> pd.DataFrame:
+    """Check the two assumptions behind using realised variance as a proxy.
+
+    Realised variance `sum(r^2)` estimates the variance of the daily returns
+    only if (i) their mean is negligible compared with their standard
+    deviation, so that not subtracting the mean costs nothing, and (ii) the
+    returns are close to serially uncorrelated, so that the squared terms alone
+    capture the variation (Andersen et al., 2003). When (ii) fails, the
+    French-Schwert-Stambaugh correction in `rv_fss` is the remedy.
+
+    One row per series and sub-period, with:
+
+    * `mean`, `std` and `mean_over_std` for assumption (i);
+    * `acf1`, the lag-1 autocorrelation, and `band_95` = 1.96/sqrt(n), the
+      width of the band inside which `acf1` is indistinguishable from zero,
+      for assumption (ii).
+    """
+    periods = SUB_PERIODS if periods is None else periods
+    rows = []
+    for name in names:
+        series = returns[f"{name}_ret"].dropna()
+        for label, (start, end) in periods.items():
+            window = series.loc[start:end]
+            n = len(window)
+            mean, std = window.mean(), window.std()
+            acf1 = window.autocorr(lag=1)
+            band = 1.96 / np.sqrt(n) if n else np.nan
+            rows.append({
+                "series": name, "period": label, "n": n,
+                "mean": mean, "std": std,
+                "mean_over_std": mean / std if std else np.nan,
+                "acf1": acf1, "band_95": band,
+                "acf1_outside_band": bool(abs(acf1) > band) if n else False,
+            })
+    return pd.DataFrame(rows)
+
+
+def proxy_assumption_summary(diagnostics: pd.DataFrame) -> str:
+    """A one-paragraph verdict on the diagnostics, for the notebook."""
+    lines = []
+    for name, group in diagnostics.groupby("series", sort=False):
+        whole = group[group["period"] == "whole sample"].iloc[0]
+        flagged = group[(group["period"] != "whole sample") & group["acf1_outside_band"]]
+        mean_ok = abs(whole["mean_over_std"]) < 0.05
+        lines.append(
+            f"{name}: mean is {whole['mean']:+.6f} against a standard deviation of "
+            f"{whole['std']:.4f} ({abs(whole['mean_over_std']):.1%} of it), so the mean is "
+            f"{'negligible' if mean_ok else 'NOT negligible'}. "
+            f"Lag-1 autocorrelation over the whole sample is {whole['acf1']:+.3f} "
+            f"against a 95% band of +/-{whole['band_95']:.3f}, so it is "
+            f"{'outside' if whole['acf1_outside_band'] else 'inside'} the band. "
+            + (f"Sub-periods outside the band: {', '.join(flagged['period'])}."
+               if not flagged.empty else "No sub-period is outside the band.")
+        )
+    return "\n".join(lines)
+
+
+def fss_comparison(panel: pd.DataFrame, names: list[str] = PRICE_NAMES) -> pd.DataFrame:
+    """Compare the FSS robustness proxy with the plain realised variance.
+
+    Reports how many weeks the FSS correction makes non-positive (and so
+    unusable), and the correlation between the two proxies on the log scale,
+    which is what the models predict. A correlation close to 1 means the
+    correction would not change the modelling.
+    """
+    rows = []
+    for name in names:
+        adj, fss = panel[f"{name}_rv_adj"], panel[f"{name}_rv_fss"]
+        usable = panel[f"{name}_n_days"] >= MIN_DAYS_PER_WEEK
+        both = adj.notna() & fss.notna()
+        rows.append({
+            "series": name,
+            "weeks_usable_n_days": int(usable.sum()),
+            "rv_adj_available": int(adj.notna().sum()),
+            "rv_fss_available": int(fss.notna().sum()),
+            "rv_fss_non_positive": int((usable & fss.isna() & adj.notna()).sum()),
+            "corr_log_rv_adj_log_rv_fss": float(
+                np.corrcoef(np.log(adj[both]), np.log(fss[both]))[0, 1]),
+            "corr_levels": float(np.corrcoef(adj[both], fss[both])[0, 1]),
+        })
+    return pd.DataFrame(rows)
 
 
 def most_volatile_weeks(panel: pd.DataFrame, name: str = "wti", n: int = 10) -> pd.DataFrame:
