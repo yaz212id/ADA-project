@@ -33,27 +33,22 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from .config import SAMPLE_END, SAMPLE_START, TRAIN_END, VALID_END
-from .data_utils import SERIES, read_series
+from .config import (DAYS_PER_WEEK, EIA_RELEASE_LAG_DAYS, MIN_DAYS_PER_WEEK,
+                     MIN_EIA_LAG_DAYS, NEGATIVE_PRICE_WEEK,
+                     NEGLIGIBLE_MEAN_RATIO, SAMPLE_END, SAMPLE_START,
+                     TRAIN_END, VALID_END, WEEK_FREQ, WEEKS_PER_YEAR)
+from .data_utils import PRICE_NAMES, WEEKLY_NAMES, read_series
 
-# Weeks end on Friday, like the EIA weeks.
-WEEK_FREQ = "W-FRI"
+# Every modelling constant lives in config.py. They are re-exported here so the
+# notebooks can read them off this module (cl.WEEK_FREQ, cl.MIN_DAYS_PER_WEEK)
+# without importing config as well.
+__all_constants__ = ("WEEK_FREQ", "WEEKS_PER_YEAR", "DAYS_PER_WEEK",
+                     "MIN_DAYS_PER_WEEK", "EIA_RELEASE_LAG_DAYS",
+                     "MIN_EIA_LAG_DAYS")
 
-# Weeks per year, used to annualise the weekly realised variance.
-WEEKS_PER_YEAR = 52
-
-# A full trading week. Realised variance is rescaled to this many days.
-DAYS_PER_WEEK = 5
-
-# A week needs at least this many trading days covered for its realised
-# variance to be used.
-MIN_DAYS_PER_WEEK = 3
-
-# The price series of the project; WTI is the main one, Brent the robustness check.
-PRICE_NAMES = ["wti", "brent"]
-
-# The 11 EIA weekly series, in the order used in the panel.
-EIA_NAMES = [s.name for s in SERIES if s.group == "weekly"]
+# The metric names come from data_utils, where SERIES is defined, so they are
+# never retyped. EIA_NAMES keeps its own name because the panel uses it.
+EIA_NAMES = WEEKLY_NAMES
 
 # The price variables computed for each price series, in panel order.
 PRICE_VARS = ["rv", "rv_adj", "n_days", "log_rv", "rvol_ann", "ret_w", "rv_fss"]
@@ -267,7 +262,8 @@ def non_friday_dates(table: pd.DataFrame) -> pd.DatetimeIndex:
     return index[index.dayofweek != 4]  # Monday = 0, so Friday = 4
 
 
-def add_release_dates(table: pd.DataFrame, lag_days: int = 6) -> pd.DataFrame:
+def add_release_dates(table: pd.DataFrame,
+                      lag_days: int = EIA_RELEASE_LAG_DAYS) -> pd.DataFrame:
     """Add the date on which each EIA week became public.
 
     A week ending Friday is published the following Wednesday at 10:30 ET, or
@@ -283,7 +279,7 @@ def add_release_dates(table: pd.DataFrame, lag_days: int = 6) -> pd.DataFrame:
 
 def align_eia_to_weeks(week_index: pd.DatetimeIndex,
                        table: pd.DataFrame,
-                       lag_days: int = 6) -> pd.DataFrame:
+                       lag_days: int = EIA_RELEASE_LAG_DAYS) -> pd.DataFrame:
     """Attach to each panel week the latest EIA data published by that Friday.
 
     For a panel week ending on Friday t, `pd.merge_asof(direction="backward")`
@@ -304,7 +300,8 @@ def align_eia_to_weeks(week_index: pd.DatetimeIndex,
     return merged.set_index("date").drop(columns="release_date").rename_axis("date")
 
 
-def lookahead_violations(panel: pd.DataFrame, min_lag_days: int = 7) -> pd.DataFrame:
+def lookahead_violations(panel: pd.DataFrame,
+                         min_lag_days: int = MIN_EIA_LAG_DAYS) -> pd.DataFrame:
     """Rows where the EIA week used is too recent (expected: none).
 
     Each row must use an EIA week ending at least `min_lag_days` before the
@@ -341,7 +338,7 @@ def negative_price_weeks(week_index: pd.DatetimeIndex, name: str = "wti") -> pd.
 
 def build_weekly_panel(start: str = SAMPLE_START, end: str = SAMPLE_END,
                        min_days: int = MIN_DAYS_PER_WEEK,
-                       lag_days: int = 6) -> tuple[pd.DataFrame, pd.DataFrame]:
+                       lag_days: int = EIA_RELEASE_LAG_DAYS) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Build the whole stage 2 output: the daily returns and the weekly panel.
 
     The columns are, in order: the six price variables of WTI, the same six for
@@ -408,7 +405,7 @@ def price_completeness(panel: pd.DataFrame, names: list[str] = PRICE_NAMES,
     return out.rename_axis("year")
 
 
-def check_panel(panel: pd.DataFrame, min_lag_days: int = 7) -> None:
+def check_panel(panel: pd.DataFrame, min_lag_days: int = MIN_EIA_LAG_DAYS) -> None:
     """Raise if the panel breaks a rule the later stages rely on.
 
     Checks that the weekly index is unique, sorted and made only of Fridays,
@@ -436,10 +433,24 @@ def check_panel(panel: pd.DataFrame, min_lag_days: int = 7) -> None:
 # ---------------------------------------------------------------------------
 
 # The chronological sub-periods of the project, from config.py.
+def _period_label(name: str, first_year_from: str, end: str,
+                  starts_after_boundary: bool = False) -> str:
+    """A label like "train 2000-2014", built from the dates in config.py.
+
+    A period that begins at the previous period's end date is labelled with the
+    year that follows it, so the tune period reads 2015-2018 and not 2014-2018.
+    """
+    first = pd.Timestamp(first_year_from)
+    if starts_after_boundary:
+        first = first + pd.Timedelta(days=1)
+    return f"{name} {first.year}-{pd.Timestamp(end).year}"
+
+
+# The slicing bounds are unchanged; only the labels are derived from config.
 SUB_PERIODS: dict[str, tuple[str, str]] = {
-    "train 2000-2014": (SAMPLE_START, TRAIN_END),
-    "tune 2015-2018": (TRAIN_END, VALID_END),
-    "test 2019-2026": (VALID_END, SAMPLE_END),
+    _period_label("train", SAMPLE_START, TRAIN_END): (SAMPLE_START, TRAIN_END),
+    _period_label("tune", TRAIN_END, VALID_END, True): (TRAIN_END, VALID_END),
+    _period_label("test", VALID_END, SAMPLE_END, True): (VALID_END, SAMPLE_END),
     "whole sample": (SAMPLE_START, SAMPLE_END),
 }
 
@@ -482,13 +493,18 @@ def return_diagnostics(returns: pd.DataFrame, names: list[str] = PRICE_NAMES,
     return pd.DataFrame(rows)
 
 
-def proxy_assumption_summary(diagnostics: pd.DataFrame) -> str:
-    """A one-paragraph verdict on the diagnostics, for the notebook."""
+def proxy_assumption_summary(diagnostics: pd.DataFrame,
+                             negligible_ratio: float = NEGLIGIBLE_MEAN_RATIO) -> str:
+    """A one-paragraph verdict on the diagnostics, for the notebook.
+
+    A mean smaller than `negligible_ratio` times the standard deviation counts
+    as negligible, which is the first assumption behind the proxy.
+    """
     lines = []
     for name, group in diagnostics.groupby("series", sort=False):
         whole = group[group["period"] == "whole sample"].iloc[0]
         flagged = group[(group["period"] != "whole sample") & group["acf1_outside_band"]]
-        mean_ok = abs(whole["mean_over_std"]) < 0.05
+        mean_ok = abs(whole["mean_over_std"]) < negligible_ratio
         lines.append(
             f"{name}: mean is {whole['mean']:+.6f} against a standard deviation of "
             f"{whole['std']:.4f} ({abs(whole['mean_over_std']):.1%} of it), so the mean is "
@@ -593,7 +609,7 @@ def panel_eia_missing_weeks(panel: pd.DataFrame,
 
 
 def log_rv_gap_to_next(panel: pd.DataFrame, name: str = "wti",
-                       week: str = "2020-04-24") -> dict:
+                       week: str = NEGATIVE_PRICE_WEEK) -> dict:
     """How far one week's log_rv stands above the next-highest week.
 
     On the log scale a difference is a ratio: a gap of 1.2 log points means the

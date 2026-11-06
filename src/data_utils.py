@@ -111,6 +111,11 @@ SERIES: list[Series] = [
 SERIES_BY_ID = {s.series_id: s for s in SERIES}
 SERIES_BY_NAME = {s.name: s for s in SERIES}
 
+# The metric names of each group, derived from SERIES so they are written once.
+# WTI is the main price series and Brent the robustness check.
+PRICE_NAMES = [s.name for s in SERIES if s.group == "prices"]
+WEEKLY_NAMES = [s.name for s in SERIES if s.group == "weekly"]
+
 
 def series_table(series: list[Series] = SERIES) -> pd.DataFrame:
     """The list of series as a table (for display and for the paper)."""

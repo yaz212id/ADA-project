@@ -33,7 +33,7 @@ NOTEBOOKS_DIR = ROOT / "notebooks"
 STAGES: list[str] = [
     "01_download_data.ipynb",
     "02_clean_data.ipynb",
-    # "03_features.ipynb",
+    "03_features.ipynb",
     # "04_models.ipynb",
     # "05_backtest.ipynb",
     # "06_figures_tables.ipynb",

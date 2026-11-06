@@ -16,10 +16,12 @@ ada-oil-volatility/
 │   ├── config.py               folders, sample dates, train/tune/test split
 │   ├── data_utils.py           list of EIA series; download, xls→csv conversion, reading
 │   ├── cleaning.py             daily returns, weekly aggregation, EIA release-date alignment
+│   ├── features.py             target, HAR inputs, oil features, PCA, regimes
 │   └── evaluation.py           QLIKE, MSE and Mincer-Zarnowitz for scoring forecasts (stage 4)
 ├── notebooks/                  one notebook per stage, run in order
 │   ├── 01_download_data.ipynb  stage 1: obtain the data
-│   └── 02_clean_data.ipynb     stage 2: clean and build the weekly panel
+│   ├── 02_clean_data.ipynb     stage 2: clean and build the weekly panel
+│   └── 03_features.ipynb       stage 3: target, features, PCA, regimes
 ├── data/
 │   ├── raw/
 │   │   ├── xls/                original EIA downloads (not committed)
@@ -28,7 +30,8 @@ ada-oil-volatility/
 │   │   └── manifest.csv        coverage of every file (written by notebook 01)
 │   └── processed/              cleaned data, not committed (written by notebook 02)
 │       ├── daily_returns.csv   daily log returns of WTI and Brent
-│       └── weekly_panel.csv    one row per week ending Friday: the stage 2 output
+│       ├── weekly_panel.csv    one row per week ending Friday: the stage 2 output
+│       └── features.csv        target and features: the stage 3 output
 ├── results/
 │   ├── figures/                every figure in the paper
 │   └── tables/                 every table in the paper
@@ -36,7 +39,7 @@ ada-oil-volatility/
 └── drafts/                     testing area, NOT in Git and not part of the submission
 ```
 
-Planned stages: `03_features` (PCA, regimes) → `04_models` → `05_backtest` → `06_figures_tables`.
+Planned stages: `04_models` → `05_backtest` → `06_figures_tables`.
 
 ## How to run
 
@@ -64,7 +67,8 @@ Planned stages: `03_features` (PCA, regimes) → `04_models` → `05_backtest` �
 |---|---|---|---|
 | 1 | `01_download_data.ipynb` | the 13 CSV files in `data/raw/` and `manifest.csv` | ~17 s (13 `.xls` downloads + ~12 API requests) |
 | 2 | `02_clean_data.ipynb` | `data/processed/daily_returns.csv`, `data/processed/weekly_panel.csv`, `results/tables/data_coverage.csv` | ~5 s |
-| | **total** (`python run_all.py`) | | **~22 s** |
+| 3 | `03_features.ipynb` | `data/processed/features.csv`, and `scaler_params.csv`, `feature_drift.csv`, `clip_limits.csv`, `pca_loadings.csv` in `results/tables/` | ~9 s |
+| | **total** (`python run_all.py`) | | **~31 s** |
 
 Measured on a 2024 MacBook (Apple silicon, Python 3.13). Stage 1 is almost entirely waiting on the EIA servers, so it varies with the connection; a first run that has to download every `.xls` file takes longer than a re-run, which skips files already present.
 

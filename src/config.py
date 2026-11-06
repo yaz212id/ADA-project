@@ -27,17 +27,201 @@ EIA_API_KEY_VAR = "EIA_API_KEY"
 DAILY_RETURNS_PATH = PROCESSED_DIR / "daily_returns.csv"
 WEEKLY_PANEL_PATH = PROCESSED_DIR / "weekly_panel.csv"
 
+# Stage 3 output (also derived from the prices, so also NOT committed)
+FEATURES_PATH = PROCESSED_DIR / "features.csv"
+
 # Outputs used in the paper
 RESULTS_DIR = ROOT / "results"
 FIGURES_DIR = RESULTS_DIR / "figures"
 TABLES_DIR = RESULTS_DIR / "tables"
 COVERAGE_TABLE_PATH = TABLES_DIR / "data_coverage.csv"
+SCALER_PARAMS_PATH = TABLES_DIR / "scaler_params.csv"
+FEATURE_DRIFT_PATH = TABLES_DIR / "feature_drift.csv"
+CLIP_LIMITS_PATH = TABLES_DIR / "clip_limits.csv"
+PCA_LOADINGS_PATH = TABLES_DIR / "pca_loadings.csv"
 
 # Sample definition. The end date is fixed so that results do not change
 # when EIA publishes new weeks. 2026-10-30 is a Friday (end of an EIA week).
 SAMPLE_START = "2000-01-01"
 SAMPLE_END = "2026-10-30"
 
-# Chronological split (train / tune / test), as in the proposal
-TRAIN_END = "2014-12-31"   # train: 2000-2014
-VALID_END = "2018-12-31"   # tune:  2015-2018, test: 2019-SAMPLE_END
+# Chronological split (train / tune / test), as in the proposal. The dates refer
+# to week t, the week the features describe.
+#
+# SAMPLE_START above is the start of the stage 2 *panel* and is deliberately
+# earlier than the modelling sample: stage 3 needs 12 weeks of past volatility
+# for the HAR inputs, so it cannot start on the panel's own first week. The
+# modelling sample start is not fixed here — it is computed in stage 3 as the
+# first Friday on which every feature exists (about late April 2004, because
+# Cushing stocks only begin in 2004) and reported by notebook 03.
+TRAIN_END = "2014-12-31"   # train: start of the modelling sample - 2014
+VALID_END = "2018-12-31"   # validation: 2015-2018, test: 2019 - last week with a target
+
+# ---------------------------------------------------------------------------
+# Weeks, volatility and the EIA release rule (stage 2)
+# ---------------------------------------------------------------------------
+
+# Weeks end on Friday, the same convention as the EIA weeks.
+WEEK_FREQ = "W-FRI"
+
+# A full trading week, and the number of weeks used to annualise a variance.
+DAYS_PER_WEEK = 5
+WEEKS_PER_YEAR = 52
+
+# Fewest trading days a week must cover for its realised variance to be used.
+MIN_DAYS_PER_WEEK = 3
+
+# Realised variance does not subtract a mean, so it only measures variance if the
+# average daily return is small next to its standard deviation. A mean below this
+# fraction of the standard deviation counts as negligible (Andersen et al., 2003).
+NEGLIGIBLE_MEAN_RATIO = 0.05
+
+# An EIA weekly value is dated the Friday the week ended but published the
+# following Wednesday, or the Thursday when a US holiday falls in between. We
+# always assume the Thursday: one day late at worst, never too early.
+EIA_RELEASE_LAG_DAYS = 6
+
+# The shortest gap the panel may have between week t and the EIA week it uses.
+# Both dates are Fridays, so a 6-day release lag always lands on t - 7 days.
+MIN_EIA_LAG_DAYS = 7
+
+# ---------------------------------------------------------------------------
+# Stage 3: how the features are built
+# ---------------------------------------------------------------------------
+
+# HAR windows in weeks (Corsi, 2009): this week, a month, a quarter.
+HAR_WINDOWS = {"har_w": 1, "har_m": 4, "har_q": 12}
+
+# The seasonal average: the same ISO week, plus or minus SEASONAL_WEEK_WINDOW
+# weeks, in each of the previous SEASONAL_YEARS years, so at most 15 values.
+SEASONAL_YEARS = 5
+SEASONAL_WEEK_WINDOW = 1
+SEASONAL_MIN_VALUES = 12
+
+# A gap of this many weeks inside an EIA series is carried forward from the
+# week before it; longer gaps stay missing. Only past values are ever used.
+MAX_FORWARD_FILL_WEEKS = 1
+
+# Horizons used by the flow features: a month, and a year.
+CHANGE_HORIZON_WEEKS = 4
+YEAR_HORIZON_WEEKS = 52
+
+# The WTI futures contract rule: trading stops this many business days before
+# the 25th calendar day of the month before delivery, or one more when the 25th
+# is not itself a business day.
+EXPIRY_REFERENCE_DAY = 25
+EXPIRY_BUSINESS_DAYS_BEFORE = 3
+EXPIRY_BUSINESS_DAYS_BEFORE_IF_HOLIDAY = 4
+
+# Week t+1 runs from the Monday after Friday t to the following Friday.
+NEXT_WEEK_FIRST_DAY_OFFSET = 3
+NEXT_WEEK_LAST_DAY_OFFSET = 7
+
+# A year with fewer daily prices than this is listed by notebook 01: a full
+# trading year has about 250 days, so anything this low is a partial year.
+MIN_DAILY_PRICES_PER_YEAR = 240
+
+# Share of validation or test values outside the training range, in percent,
+# above which a feature is flagged as having drifted.
+DRIFT_FLAG_PCT = 10.0
+
+# Gaussian mixture settings (Lecture 12).
+REGIME_COVARIANCE_TYPE = "full"
+REGIME_N_INIT = 10
+REGIME_STABILITY_SEEDS = 5
+
+# Share of training weeks that must keep the same regime label across all seeds
+# for the chosen K to count as stable. Below this the regimes move with the
+# random seed and do not describe anything real.
+REGIME_STABILITY_MIN = 0.90
+
+# The three chronological splits, in order.
+SPLIT_NAMES = ("train", "validation", "test")
+
+# ---------------------------------------------------------------------------
+# Known dates, used only to check that the code finds them by itself
+# ---------------------------------------------------------------------------
+# Nothing is computed from these: each one is detected from the data and then
+# compared with the value here, so a check can fail loudly if the data change.
+
+# WTI settled below zero on this day, in the week ending NEGATIVE_PRICE_WEEK.
+NEGATIVE_PRICE_DATE = "2020-04-20"
+NEGATIVE_PRICE_WEEK = "2020-04-24"
+
+# The week whose features are reproduced by hand in notebook 03.
+HAND_CHECK_WEEK = "2020-04-17"
+
+# The contract whose last trading day is checked, and that day.
+EXPIRY_CHECK_DELIVERY_MONTH = "2020-05"
+EXPIRY_CHECK_LAST_TRADING_DAY = "2020-04-21"
+
+# The two months whose extreme swings dominate the WTI return autocorrelation.
+COVID_WINDOW = ("2020-03-01", "2020-04-30")
+
+# Episodes shown in the volatility ranking of notebook 02.
+VOLATILITY_EPISODES = {
+    "COVID crash (Mar-May 2020)": ("2020-03-01", "2020-05-31"),
+    "Iraq war (Mar 2003)": ("2003-03-01", "2003-04-30"),
+    "Global financial crisis (2008)": ("2008-09-01", "2008-12-31"),
+    "Ukraine invasion (Mar 2022)": ("2022-02-20", "2022-04-10"),
+    "March-April 2026": ("2026-03-01", "2026-04-30"),
+}
+
+# Weeks whose seasonal averages are checked for look-ahead in notebook 03.
+SEASONAL_CHECK_WEEKS = ("2008-07-04", "2015-01-02", "2020-04-10", "2026-01-02")
+
+# ---------------------------------------------------------------------------
+# Stage 3: the feature list. FROZEN - no feature is added after stage 3.
+# ---------------------------------------------------------------------------
+
+# Past volatility (Corsi, 2009, log HAR) plus the futures-expiry calendar flag.
+# The flag is in every feature set, so comparing sets isolates the EIA data.
+BASE_FEATURES = ["har_w", "har_m", "har_q", "expiry_next_week"]
+
+# The 12 oil-market features built from the EIA weekly series.
+OIL_FEATURES = [
+    "crude_surprise", "gasoline_surprise", "distillate_surprise",
+    "crude_deviation", "gasoline_deviation", "distillate_deviation",
+    "cushing_change", "spr_change", "production_change",
+    "utilization_surprise", "net_imports_change", "demand_change",
+]
+
+# Features that are standardised and clipped. The expiry flag is 0/1 and the
+# PCA scores are already on the components' own scale, so neither is scaled.
+CONTINUOUS_FEATURES = ["har_w", "har_m", "har_q"] + OIL_FEATURES
+
+# Inputs of the Gaussian mixture used to label calm and turbulent weeks.
+REGIME_INPUTS = ["har_w", "wti_ret_w"]
+
+# Percentiles of the TRAINING rows used for the drift check and for clipping.
+CLIP_PERCENTILES = (1.0, 99.0)
+
+# PCA: keep the smallest number of components reaching this share of variance.
+PCA_VARIANCE_TARGET = 0.80
+
+# Gaussian mixture: candidate numbers of regimes, and the BIC margin within
+# which a smaller K is preferred (a BIC difference above 10 is "very strong"
+# evidence, Kass & Raftery, 1995).
+REGIME_K_VALUES = (1, 2, 3, 4)
+REGIME_BIC_MARGIN = 10.0
+RANDOM_STATE = 0
+
+
+def feature_sets(n_components: int = 0, prefix: str = "") -> dict[str, list[str]]:
+    """The feature sets stage 4 compares, as model input column names.
+
+    Continuous features enter as their standardised and clipped version, which
+    carries the suffix "_z"; the expiry flag and the PCA scores enter as they
+    are. `prefix` selects the price series for the HAR inputs: "" for WTI (the
+    main series) and "brent_" for the Brent robustness run.
+
+    * base      past volatility and the expiry flag only;
+    * full      base plus the 12 oil-market features;
+    * full_pca  base plus the first `n_components` principal components.
+    """
+    har = [f"{prefix}{name}_z" for name in ("har_w", "har_m", "har_q")]
+    base = har + ["expiry_next_week"]
+    sets = {"base": base, "full": base + [f"{name}_z" for name in OIL_FEATURES]}
+    if n_components:
+        sets["full_pca"] = base + [f"pc{i}" for i in range(1, n_components + 1)]
+    return sets
